@@ -519,15 +519,29 @@ function calcStandings(grp) {
   let sorted = data.equipos.map(eq => ({eq, ...table[eq], dg: table[eq].gf - table[eq].gc}));
   sorted.sort((a,b) => b.pts-a.pts || b.dg-a.dg || b.gf-a.gf || a.eq.localeCompare(b.eq));
 
-  // Check if manual order exists and all 6 matches played
-  const allPlayed = data.partidos.every(([,,,,mid]) => {
-    const sc = state.scores[mid];
-    return sc && sc[0] !== null && sc[1] !== null && sc[0] !== '' && sc[1] !== '';
-  });
-
-  if(allPlayed && state.manualOrder[grp]) {
-    const manual = state.manualOrder[grp];
-    sorted = manual.map(eq => ({eq, ...table[eq], dg: table[eq].gf - table[eq].gc}));
+  // Apply manual order only if it exists AND a real tie still exists
+  if(state.manualOrder[grp]) {
+    // Check if tie still valid: any two consecutive sorted entries still tied?
+    const stillTied = sorted.some((r,i) => i < sorted.length-1 &&
+      r.pts === sorted[i+1].pts && r.dg === sorted[i+1].dg && r.gf === sorted[i+1].gf);
+    if(stillTied) {
+      const manual = state.manualOrder[grp];
+      // Re-apply: locked positions stay, only tied slots rearranged per manual
+      // Build final order: start from auto-sort, then for each tied group
+      // replace that slice with the manual order for those equipos
+      const tiedSet = new Set();
+      sorted.forEach((r,i) => { if(i < sorted.length-1 &&
+        r.pts === sorted[i+1].pts && r.dg === sorted[i+1].dg && r.gf === sorted[i+1].gf) {
+        tiedSet.add(r.eq); tiedSet.add(sorted[i+1].eq);
+      }});
+      // Positions of tied equipos in sorted
+      const tiedPositions = sorted.map((r,i) => tiedSet.has(r.eq) ? i : -1).filter(i => i >= 0);
+      const manualTied = manual.filter(eq => tiedSet.has(eq));
+      let mi = 0;
+      tiedPositions.forEach(pos => { if(manualTied[mi]) { sorted[pos] = {...table[manualTied[mi]], eq: manualTied[mi], dg: table[manualTied[mi]].gf - table[manualTied[mi]].gc}; mi++; }});
+    } else {
+      delete state.manualOrder[grp]; // tie gone, discard manual order
+    }
   }
 
   return sorted;
@@ -574,26 +588,42 @@ function renderGroupDetail(grp) {
 
   document.getElementById('group-progress').style.width = (filled/total*100)+'%';
 
-  let html = '';
+  // ── CLASIFICACIÓN (la tabla ES el orden final, arrastrable si hay empate) ──
+  const titleNote = tiebreak
+    ? '🏆 Clasificación — arrastra los empatados ⚖️'
+    : '🏆 Clasificación predicha';
+  let html = `<div class="section-title">${titleNote}</div>`;
 
-  // ── 1. CLASIFICACIÓN ──────────────────────────────────────────
-  html += `<div class="section-title">🏆 Clasificación predicha</div>`;
-  html += `<div class="standings">
+  if(tiebreak) {
+    html += `<div style="background:rgba(255,107,53,.1);border:1px solid rgba(255,107,53,.35);
+      border-radius:10px;padding:10px 14px;margin-bottom:10px;font-size:12px;color:#ffaa88;line-height:1.5;">
+      ⚖️ <strong style="color:var(--accent2)">Empate técnico</strong> — las filas con ⚖ están igualadas
+      en Pts, DG y GF. Arrástralas para fijar su posición final.
+    </div>`;
+  }
+
+  // Table header
+  html += `<div class="standings" id="standings-table-${grp}">
     <div class="standings-header">
       <span>#</span><span class="s-name">Selección</span><span>Pts</span>
       <span>J</span><span>G</span><span>E</span><span>P</span><span>DG</span>
     </div>`;
+
   standings.forEach((row, i) => {
     const fi = data.equipos.indexOf(row.eq);
     const flag = data.flags[fi] || '';
-    const posClass = i===0?'gold':i===1?'silver':'';
-    // Mark tied rows
+    const posClass = i===0 ? 'gold' : i===1 ? 'silver' : '';
     const isTied = tiedGroups.some(tg => tg.includes(row.eq));
-    html += `<div class="standings-row ${i<2?'top2':''}">
-      <div class="s-pos ${posClass}">${i+1}${isTied?'<span style="color:var(--accent2);font-size:10px"> ⚖</span>':''}</div>
+    const tieIcon = isTied ? ' ⚖️' : '';
+    const draggable = isTied ? 'draggable="true"' : '';
+    const lockIcon = tiebreak && !isTied ? ' 🔒' : '';
+    html += `<div class="standings-row ${i<2?'top2':''} ${isTied?'standings-tied':'standings-locked'}"
+      ${draggable} data-eq="${row.eq}" data-grp="${grp}" data-tied="${isTied}"
+      style="${isTied?'cursor:grab':tiebreak?'opacity:.75':''}">
+      <div class="s-pos ${posClass}">${i+1}${tieIcon}</div>
       <div class="s-name-cell">
         <span class="s-flag">${flag}</span>
-        <span class="s-team">${row.eq}</span>
+        <span class="s-team">${row.eq}${lockIcon}</span>
       </div>
       <div class="s-pts">${row.pts}</div>
       <div class="s-num">${row.j}</div>
@@ -603,69 +633,33 @@ function renderGroupDetail(grp) {
       <div class="s-num">${row.dg>=0?'+':''}${row.dg}</div>
     </div>`;
   });
-  html += `</div>`;
+  html += '</div>';
 
-  // ── 2. PARTIDOS ───────────────────────────────────────────────
-  html += `<div class="section-title">⚽ Resultados</div>`;
+  // ── RESULTADOS ────────────────────────────────────────────────
+  html += '<div class="section-title">⚽ Resultados</div>';
   data.partidos.forEach(([fecha, jor, loc, vis, mid]) => {
     const sc = state.scores[mid];
     const gl = (sc && sc[0] !== null) ? sc[0] : null;
     const gv = (sc && sc[1] !== null) ? sc[1] : null;
-    const isFilled = gl !== null && gv !== null;
-    html += `<div class="match-card ${isFilled?'filled':''}" id="card-${mid}">
-      <div class="match-header">
-        <span>${jor} · ${fecha}</span><span>${mid}</span>
-      </div>
+    html += `<div class="match-card ${gl!==null&&gv!==null?'filled':''}" id="card-${mid}">
+      <div class="match-header"><span>${jor} · ${fecha}</span><span>${mid}</span></div>
       <div class="match-body">
         <div class="match-team home">${loc}</div>
         <div class="score-stepper">
           <button class="step-btn minus" ontouchstart="" onclick="stepScore('${mid}',0,-1,'${grp}')">−</button>
-          <div class="step-display ${gl!==null?'has-value':''}" id="gl-${mid}">${gl !== null ? gl : '·'}</div>
-          <button class="step-btn plus"  ontouchstart="" onclick="stepScore('${mid}',0,+1,'${grp}')">+</button>
+          <div class="step-display ${gl!==null?'has-value':''}" id="gl-${mid}">${gl!==null?gl:'·'}</div>
+          <button class="step-btn plus" ontouchstart="" onclick="stepScore('${mid}',0,+1,'${grp}')">+</button>
         </div>
         <span class="vs-sep">-</span>
         <div class="score-stepper">
           <button class="step-btn minus" ontouchstart="" onclick="stepScore('${mid}',1,-1,'${grp}')">−</button>
-          <div class="step-display ${gv!==null?'has-value':''}" id="gv-${mid}">${gv !== null ? gv : '·'}</div>
-          <button class="step-btn plus"  ontouchstart="" onclick="stepScore('${mid}',1,+1,'${grp}')">+</button>
+          <div class="step-display ${gv!==null?'has-value':''}" id="gv-${mid}">${gv!==null?gv:'·'}</div>
+          <button class="step-btn plus" ontouchstart="" onclick="stepScore('${mid}',1,+1,'${grp}')">+</button>
         </div>
         <div class="match-team away">${vis}</div>
       </div>
     </div>`;
   });
-
-  // ── 3. ORDEN (solo si hay empate real) ────────────────────────
-  if(tiebreak) {
-    html += `<div class="section-title">⚖️ Orden final — desempate</div>`;
-    html += `<div class="tiebreak-banner">
-      <span class="tb-icon">⚖️</span>
-      <div class="tb-text"><strong>Empate técnico</strong><br>
-      Solo los equipos con ⚖ están empatados. Arrastra para fijar su orden.</div>
-    </div>`;
-
-    // Build the drag list: non-tied positions are fixed (locked), tied ones are draggable
-    // Get current order (manual or calculated)
-    const currentOrder = state.manualOrder[grp] || standings.map(r => r.eq);
-
-    html += `<ul class="drag-list" id="drag-list-${grp}">`;
-    currentOrder.forEach((eq, i) => {
-      const fi = data.equipos.indexOf(eq);
-      const flag = data.flags[fi] || '';
-      const row = standings.find(r => r.eq === eq) || {pts:0,dg:0,gf:0};
-      const isTied = tiedGroups.some(tg => tg.includes(eq));
-      // locked = not part of any tied group → can't be dragged
-      html += `<li class="drag-item ${isTied?'':'drag-locked'}"
-        ${isTied?'draggable="true"':''}
-        data-eq="${eq}" data-grp="${grp}" data-tied="${isTied}">
-        <span class="drag-handle" style="${isTied?'':'opacity:.3;cursor:default'}">${isTied?'⠿':'🔒'}</span>
-        <span class="drag-pos">${i+1}</span>
-        <span class="drag-flag">${flag}</span>
-        <span class="drag-name">${eq}</span>
-        <span class="drag-stats">${row.pts}pts · DG${row.dg>=0?'+':''}${row.dg} · ${row.gf}GF${isTied?' ⚖':''}</span>
-      </li>`;
-    });
-    html += `</ul>`;
-  }
 
   html += `<div class="btn-row">
     <button class="btn btn-secondary" onclick="backToGroups()">← Grupos</button>
@@ -673,7 +667,7 @@ function renderGroupDetail(grp) {
   </div>`;
 
   document.getElementById('group-content').innerHTML = html;
-  if(tiebreak) setupDragAndDrop(grp);
+  if(tiebreak) setupStandingsDrag(grp);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -750,105 +744,6 @@ function openGroup(grp) {
   renderGroupDetail(grp);
 }
 
-function renderGroupDetail(grp) {
-  const data = GRUPOS[grp];
-  const standings = calcStandings(grp);
-  const {filled, total} = getGroupProgress(grp);
-  const tiebreak = hasTiebreak(grp);
-
-  document.getElementById('group-progress').style.width = (filled/total*100)+'%';
-
-  let html = '';
-
-  // Standings table
-  html += `<div class="section-title">🏆 Clasificación predicha</div>`;
-  html += `<div class="standings">
-    <div class="standings-header">
-      <span>#</span><span class="s-name">Selección</span><span>Pts</span>
-      <span>J</span><span>G</span><span>E</span><span>P</span><span>DG</span>
-    </div>`;
-  standings.forEach((row, i) => {
-    const fi = data.equipos.indexOf(row.eq);
-    const flag = data.flags[fi] || '';
-    const posClass = i===0?'gold':i===1?'silver':'';
-    html += `<div class="standings-row ${i<2?'top2':''}">
-      <div class="s-pos ${posClass}">${i+1}</div>
-      <div class="s-name-cell">
-        <span class="s-flag">${flag}</span>
-        <span class="s-team">${row.eq}</span>
-      </div>
-      <div class="s-pts">${row.pts}</div>
-      <div class="s-num">${row.j}</div>
-      <div class="s-num">${row.g}</div>
-      <div class="s-num">${row.e}</div>
-      <div class="s-num">${row.p}</div>
-      <div class="s-num">${row.dg>=0?'+':''}${row.dg}</div>
-    </div>`;
-  });
-  html += `</div>`;
-
-  // Tiebreak section
-  if(tiebreak) {
-    html += `<div class="tiebreak-banner">
-      <span class="tb-icon">⚖️</span>
-      <div class="tb-text"><strong>Empate técnico</strong><br>Arrastra para fijar el orden final del grupo</div>
-    </div>`;
-    // Drag list for tiebreak
-    const order = state.manualOrder[grp] || standings.map(r => r.eq);
-    html += `<ul class="drag-list" id="drag-list-${grp}">`;
-    order.forEach((eq, i) => {
-      const fi = data.equipos.indexOf(eq);
-      const flag = data.flags[fi] || '';
-      const row = standings.find(r => r.eq === eq) || {pts:0,dg:0,gf:0,j:0};
-      html += `<li class="drag-item" draggable="true" data-eq="${eq}" data-grp="${grp}">
-        <span class="drag-handle">⠿</span>
-        <span class="drag-pos">${i+1}</span>
-        <span class="drag-flag">${flag}</span>
-        <span class="drag-name">${eq}</span>
-        <span class="drag-stats">${row.pts}pts · DG${row.dg>=0?'+':''}${row.dg} · ${row.gf}GF</span>
-      </li>`;
-    });
-    html += `</ul>`;
-  }
-
-  // Matches
-  html += `<div class="section-title">⚽ Partidos — rellena tus goles</div>`;
-  data.partidos.forEach(([fecha, jor, loc, vis, mid]) => {
-    const sc = state.scores[mid];
-    const gl = (sc && sc[0] !== null) ? sc[0] : null;
-    const gv = (sc && sc[1] !== null) ? sc[1] : null;
-    const isFilled = gl !== null && gv !== null;
-    html += `<div class="match-card ${isFilled?'filled':''}" id="card-${mid}">
-      <div class="match-header">
-        <span>${jor} · ${fecha}</span><span>${mid}</span>
-      </div>
-      <div class="match-body">
-        <div class="match-team home">${loc}</div>
-        <div class="score-stepper">
-          <button class="step-btn minus" ontouchstart="" onclick="stepScore('${mid}',0,-1,'${grp}')">−</button>
-          <div class="step-display ${gl!==null?'has-value':''}" id="gl-${mid}">${gl !== null ? gl : '·'}</div>
-          <button class="step-btn plus"  ontouchstart="" onclick="stepScore('${mid}',0,+1,'${grp}')">+</button>
-        </div>
-        <span class="vs-sep">-</span>
-        <div class="score-stepper">
-          <button class="step-btn minus" ontouchstart="" onclick="stepScore('${mid}',1,-1,'${grp}')">−</button>
-          <div class="step-display ${gv!==null?'has-value':''}" id="gv-${mid}">${gv !== null ? gv : '·'}</div>
-          <button class="step-btn plus"  ontouchstart="" onclick="stepScore('${mid}',1,+1,'${grp}')">+</button>
-        </div>
-        <div class="match-team away">${vis}</div>
-      </div>
-    </div>`;
-  });
-
-  html += `<div class="btn-row">
-    <button class="btn btn-secondary" onclick="backToGroups()">← Grupos</button>
-    <button class="btn btn-primary" onclick="backToGroups()">Guardar ✓</button>
-  </div>`;
-
-  document.getElementById('group-content').innerHTML = html;
-  setupDragAndDrop(grp);
-}
-
 function stepScore(mid, idx, delta, grp) {
   if(!state.scores[mid]) state.scores[mid] = [null, null];
   const current = state.scores[mid][idx];
@@ -856,6 +751,8 @@ function stepScore(mid, idx, delta, grp) {
   if(next !== null && next < 0) next = 0;
   if(next !== null && next > 20) next = 20;
   state.scores[mid][idx] = next;
+  // Any score change invalidates manual order — recalculate from results
+  delete state.manualOrder[grp];
   saveState();
 
   // Update display
@@ -864,7 +761,6 @@ function stepScore(mid, idx, delta, grp) {
   if(display) {
     display.textContent = next !== null ? next : '·';
     display.classList.toggle('has-value', next !== null);
-    // Sync border color on sibling step-btns
     const stepper = display.closest('.score-stepper');
     if(stepper) {
       stepper.querySelectorAll('.step-btn').forEach(b => {
@@ -894,114 +790,86 @@ function setScore(mid, idx, val, grp) {
 }
 
 function updateStandingsInPlace(grp) {
-  // Re-render just the standings table rows
-  const data = GRUPOS[grp];
-  const standings = calcStandings(grp);
-  const rows = document.querySelectorAll('.standings-row');
-  if(rows.length !== standings.length) {
-    // Full re-render needed (tiebreak changed)
-    renderGroupDetail(grp);
-    return;
-  }
-  standings.forEach((row, i) => {
-    const fi = data.equipos.indexOf(row.eq);
-    const flag = data.flags[fi] || '';
-    const posClass = i===0?'gold':i===1?'silver':'';
-    rows[i].className = 'standings-row' + (i<2?' top2':'');
-    rows[i].innerHTML = `
-      <div class="s-pos ${posClass}">${i+1}</div>
-      <div class="s-name-cell"><span class="s-flag">${flag}</span><span class="s-team">${row.eq}</span></div>
-      <div class="s-pts">${row.pts}</div>
-      <div class="s-num">${row.j}</div>
-      <div class="s-num">${row.g}</div>
-      <div class="s-num">${row.e}</div>
-      <div class="s-num">${row.p}</div>
-      <div class="s-num">${row.dg>=0?'+':''}${row.dg}</div>`;
-  });
-  // Update progress
-  const {filled, total} = getGroupProgress(grp);
-  document.getElementById('group-progress').style.width = (filled/total*100)+'%';
+  // Always full re-render — keeps standings, tiebreak state and order in sync
+  renderGroupDetail(grp);
 }
 
 // ═══════════════════════════════════════════════════════════════
-// DRAG & DROP (touch + mouse)
+// DRAG & DROP on standings table rows (only tied rows)
 // ═══════════════════════════════════════════════════════════════
-function setupDragAndDrop(grp) {
-  const list = document.getElementById('drag-list-' + grp);
-  if(!list) return;
+function setupStandingsDrag(grp) {
+  const table = document.getElementById('standings-table-' + grp);
+  if(!table) return;
 
   let dragSrc = null, touchItem = null;
 
-  list.querySelectorAll('.drag-item').forEach(item => {
-    if(item.dataset.tied !== 'true') return; // skip locked items
-
-    // Mouse drag
-    item.addEventListener('dragstart', e => {
-      dragSrc = item;
-      item.classList.add('dragging');
+  table.querySelectorAll('.standings-tied').forEach(row => {
+    // ── Mouse ──
+    row.addEventListener('dragstart', e => {
+      dragSrc = row;
+      row.style.opacity = '0.5';
       e.dataTransfer.effectAllowed = 'move';
     });
-    item.addEventListener('dragend', () => {
-      item.classList.remove('dragging');
-      list.querySelectorAll('.drag-item').forEach(i => i.classList.remove('drag-over'));
-      saveDragOrder(grp);
+    row.addEventListener('dragend', () => {
+      row.style.opacity = '';
+      table.querySelectorAll('.standings-row').forEach(r => r.style.background = '');
+      saveStandingsOrder(grp);
     });
-    item.addEventListener('dragover', e => {
+    row.addEventListener('dragover', e => {
       e.preventDefault();
-      if(!dragSrc || item === dragSrc) return;
-      // Only allow dropping onto other tied items
-      if(item.dataset.tied !== 'true') return;
+      if(!dragSrc || row === dragSrc) return;
+      // Only swap with other tied rows
+      if(!row.classList.contains('standings-tied')) return;
       e.dataTransfer.dropEffect = 'move';
-      list.querySelectorAll('.drag-item').forEach(i => i.classList.remove('drag-over'));
-      item.classList.add('drag-over');
-      const items = [...list.querySelectorAll('.drag-item')];
-      const srcIdx = items.indexOf(dragSrc);
-      const dstIdx = items.indexOf(item);
-      if(srcIdx < dstIdx) item.after(dragSrc); else item.before(dragSrc);
+      const rows = [...table.querySelectorAll('.standings-row')];
+      const si = rows.indexOf(dragSrc), di = rows.indexOf(row);
+      if(si < di) row.after(dragSrc); else row.before(dragSrc);
     });
-    item.addEventListener('drop', e => { e.preventDefault(); });
+    row.addEventListener('drop', e => e.preventDefault());
 
-    // Touch drag
-    item.addEventListener('touchstart', e => {
-      touchItem = item;
-      item.classList.add('dragging');
+    // ── Touch ──
+    row.addEventListener('touchstart', e => {
+      touchItem = row;
+      row.style.opacity = '0.6';
+      row.style.transform = 'scale(1.02)';
     }, {passive:true});
 
-    item.addEventListener('touchmove', e => {
+    row.addEventListener('touchmove', e => {
       if(!touchItem) return;
       e.preventDefault();
       const t = e.touches[0];
-      const items = [...list.querySelectorAll('.drag-item')];
-      items.forEach(other => {
-        if(other === touchItem || other.dataset.tied !== 'true') return;
+      const rows = [...table.querySelectorAll('.standings-row')];
+      rows.forEach(other => {
+        if(other === touchItem || !other.classList.contains('standings-tied')) return;
         const rect = other.getBoundingClientRect();
         const mid = rect.top + rect.height / 2;
-        if(t.clientY < mid && items.indexOf(touchItem) > items.indexOf(other)) {
-          other.before(touchItem);
-        } else if(t.clientY > mid && items.indexOf(touchItem) < items.indexOf(other)) {
-          other.after(touchItem);
-        }
+        const oi = rows.indexOf(other), ti = rows.indexOf(touchItem);
+        if(t.clientY < mid && ti > oi) other.before(touchItem);
+        else if(t.clientY > mid && ti < oi) other.after(touchItem);
       });
     }, {passive:false});
 
-    item.addEventListener('touchend', () => {
-      if(touchItem) { touchItem.classList.remove('dragging'); touchItem = null; }
-      saveDragOrder(grp);
+    row.addEventListener('touchend', () => {
+      if(touchItem) {
+        touchItem.style.opacity = '';
+        touchItem.style.transform = '';
+        touchItem = null;
+      }
+      saveStandingsOrder(grp);
     });
   });
 }
 
-function saveDragOrder(grp) {
-  const list = document.getElementById('drag-list-' + grp);
-  if(!list) return;
-  const order = [...list.querySelectorAll('.drag-item')].map(i => i.dataset.eq);
+function saveStandingsOrder(grp) {
+  const table = document.getElementById('standings-table-' + grp);
+  if(!table) return;
+  const order = [...table.querySelectorAll('.standings-row')]
+    .map(r => r.dataset.eq)
+    .filter(Boolean);
   state.manualOrder[grp] = order;
   saveState();
-  // Update position numbers
-  list.querySelectorAll('.drag-item').forEach((item, i) => {
-    item.querySelector('.drag-pos').textContent = i+1;
-  });
-  updateStandingsInPlace(grp);
+  // Re-render to update position numbers and top2 highlight
+  renderGroupDetail(grp);
   toast('Orden guardado ✓');
 }
 
